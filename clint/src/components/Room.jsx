@@ -4,7 +4,7 @@ import { motion } from "framer-motion";
 import io from "socket.io-client";
 import toast from "react-hot-toast";
 
-const socket = io("http://localhost:5000"); // Update this with your backend URL
+const socket = io("https://text-share-kzce.onrender.com"); // Update this with your backend URL
 
 const Room = () => {
   const { roomId } = useParams();
