@@ -31,6 +31,10 @@ const RoomSchema = new mongoose.Schema({
 
 const Room = mongoose.model("Room", RoomSchema)
 
+app.get("/", (req, res) => {
+  res.send("Server is working properly")
+})
+
 io.on("connection", (socket) => {
   console.log("A user connected")
 
