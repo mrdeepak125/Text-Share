@@ -191,7 +191,7 @@ const Room = () => {
                     
             <div className="flex items-center space-x-2 bg-gray-100 dark:bg-gray-800 px-3 py-2 rounded-full">
               <FiUsers className="text-gray-500 dark:text-gray-400" />
-              <span className="font-medium">{viewers}</span>
+              <span className="font-medium text-sky-50">{viewers}</span>
             </div>
           </div>
         </motion.header>
