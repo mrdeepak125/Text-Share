@@ -5,7 +5,7 @@ import io from "socket.io-client";
 import toast from "react-hot-toast";
 import { FiCopy, FiUsers, FiEdit2 } from "react-icons/fi";
 
-const socket = io("http://localhost:5000", {
+const socket = io("https://text-share-kzce.onrender.com", {
   reconnectionAttempts: 5,
   reconnectionDelay: 1000,
 });
