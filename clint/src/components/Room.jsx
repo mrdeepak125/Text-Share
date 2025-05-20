@@ -8,36 +8,40 @@ import { FiCopy, FiUsers, FiEdit2 } from "react-icons/fi";
 const socket = io("https://text-share-kzce.onrender.com", {
   reconnectionAttempts: 5,
   reconnectionDelay: 1000,
+  autoConnect: true,
+  transports: ["websocket"],
 });
 
 const Room = () => {
   const { roomId } = useParams();
   const [text, setText] = useState("");
-  const [typingUsers, setTypingUsers] = useState({});
+  const [typingCount, setTypingCount] = useState(0);
+  const [typingUserIds, setTypingUserIds] = useState([]);
   const [viewers, setViewers] = useState(1);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
   const [theme, setTheme] = useState(() => {
-    // Get theme from localStorage or default to light
     const savedTheme = localStorage.getItem('darkMode');
     return savedTheme === 'true' ? 'dark' : 'light';
   });
   const typingTimeoutRef = useRef(null);
   const textareaRef = useRef(null);
+  const socketRef = useRef(socket);
 
-    useEffect(() => {
+  useEffect(() => {
     localStorage.setItem('darkMode', theme === 'dark');
   }, [theme]);
 
-    const toggleTheme = () => {
+  const toggleTheme = () => {
     setTheme(prev => prev === "light" ? "dark" : "light");
   };
 
-  // Join room and set up socket listeners
   useEffect(() => {
     if (!roomId) return;
 
     setIsLoading(true);
+    const socket = socketRef.current;
+
     socket.emit("join-room", roomId);
 
     socket.on("text-update", (updatedText) => {
@@ -49,16 +53,9 @@ const Room = () => {
       setViewers(viewerCount);
     });
 
-    socket.on("user-typing", ({ userId, isTyping }) => {
-      setTypingUsers(prev => {
-        const newState = { ...prev };
-        if (isTyping) {
-          newState[userId] = true;
-        } else {
-          delete newState[userId];
-        }
-        return newState;
-      });
+    socket.on("typing-update", ({ count, userIds }) => {
+      setTypingCount(count);
+      setTypingUserIds(userIds);
     });
 
     socket.on("connect_error", (err) => {
@@ -67,37 +64,39 @@ const Room = () => {
       toast.error("Connection issues. Trying to reconnect...");
     });
 
+    socket.on("reconnect", () => {
+      setError(null);
+      socket.emit("join-room", roomId);
+      toast.success("Reconnected successfully!");
+    });
+
     return () => {
       socket.off("text-update");
       socket.off("viewer-update");
-      socket.off("user-typing");
+      socket.off("typing-update");
       socket.off("connect_error");
+      socket.off("reconnect");
     };
   }, [roomId]);
 
-  // Handle text changes with typing indicators
   const handleTextChange = (e) => {
     const newText = e.target.value;
     setText(newText);
     
-    // Emit typing start if not already typing
     if (!typingTimeoutRef.current) {
-      socket.emit("start-typing", roomId);
+      socketRef.current.emit("start-typing", roomId);
     }
     
-    // Clear any existing timeout
     if (typingTimeoutRef.current) {
       clearTimeout(typingTimeoutRef.current);
     }
     
-    // Set new timeout for typing end
     typingTimeoutRef.current = setTimeout(() => {
-      socket.emit("stop-typing", roomId);
+      socketRef.current.emit("stop-typing", roomId);
       typingTimeoutRef.current = null;
     }, 1000);
     
-    // Emit text change
-    socket.emit("text-change", { roomId, text: newText });
+    socketRef.current.emit("text-change", { roomId, text: newText });
   };
 
   const handleCopyText = () => {
@@ -153,9 +152,6 @@ const Room = () => {
     );
   }
 
-  const typingUsersCount = Object.keys(typingUsers).length;
-  const isSomeoneTyping = typingUsersCount > 0;
-
   return (
     <div className={`min-h-screen transition-colors duration-300 ${theme === "dark" ? "dark bg-gray-900" : "bg-gray-50"}`}>
       <div className="container mx-auto px-4 py-8 max-w-5xl">
@@ -173,25 +169,25 @@ const Room = () => {
           </div>
           
           <div className="flex items-center space-x-4">
-           <button
-            onClick={toggleTheme}
-            className="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
-            aria-label="Toggle theme"
-          >
-            {theme === "light" ? (
-              <svg className="w-6 h-6 text-gray-800" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
-              </svg>
-            ) : (
-              <svg className="w-6 h-6 text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
-              </svg>
-            )}
-          </button>
-                    
+            <button
+              onClick={toggleTheme}
+              className="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
+              aria-label="Toggle theme"
+            >
+              {theme === "light" ? (
+                <svg className="w-6 h-6 text-gray-800" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+                </svg>
+              ) : (
+                <svg className="w-6 h-6 text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+                </svg>
+              )}
+            </button>
+                      
             <div className="flex items-center space-x-2 bg-gray-100 dark:bg-gray-800 px-3 py-2 rounded-full">
               <FiUsers className="text-gray-500 dark:text-gray-400" />
-              <span className="font-medium text-sky-50">{viewers}</span>
+              <span className="font-medium text-gray-800 dark:text-gray-200">{viewers}</span>
             </div>
           </div>
         </motion.header>
@@ -234,7 +230,7 @@ const Room = () => {
           className="flex justify-between items-center"
         >
           <AnimatePresence>
-            {isSomeoneTyping && (
+            {typingCount > 0 && (
               <motion.div
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
@@ -256,7 +252,7 @@ const Room = () => {
                   ))}
                 </div>
                 <span className="text-sm font-medium text-blue-800 dark:text-blue-200">
-                  {typingUsersCount} {typingUsersCount === 1 ? "person is" : "people are"} typing...
+                  {typingCount} {typingCount === 1 ? "person is" : "people are"} typing...
                 </span>
               </motion.div>
             )}

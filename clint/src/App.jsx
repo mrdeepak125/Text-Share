@@ -6,6 +6,8 @@ import Navbar from "./components/Navbar"
 import Home from "./components/Home.jsx"
 import Room from "./components/Room"
 import { Toaster } from "react-hot-toast"
+import { Analytics } from "@vercel/analytics/react"
+
 function App() {
   const [darkMode, setDarkMode] = useState(false)
 
@@ -31,6 +33,7 @@ function App() {
 
   return (
     <>
+    <Analytics />
     <Toaster position="top-right" reverseOrder={false} />
     <Router>
       <div className={`relative min-h-screen ${darkMode ? "dark" : ""}`}>
