@@ -7,6 +7,7 @@ import Home from "./components/Home.jsx"
 import Room from "./components/Room"
 import { Toaster } from "react-hot-toast"
 import { Analytics } from "@vercel/analytics/react"
+import ScreenRoom from "./components/ScreenRoom.jsx"
 
 function App() {
   const [darkMode, setDarkMode] = useState(false)
@@ -42,6 +43,7 @@ function App() {
         <Routes>
           <Route path="/" element={<Home />} />
           <Route path="/room/:roomId" element={<Room />} />
+          <Route path="/screen/:roomId" element={<ScreenRoom />} />
         </Routes>
       </div>
     </Router>

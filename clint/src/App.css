@@ -1,1 +1,50 @@
 @import "tailwindcss";
+
+/* Video Room Specific Styles */
+.video-grid {
+  display: grid;
+  gap: 1rem;
+  padding: 1rem;
+}
+
+.video-item {
+  position: relative;
+  background: #000;
+  border-radius: 0.5rem;
+  overflow: hidden;
+  aspect-ratio: 16/9;
+}
+
+.video-item video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.control-button {
+  transition: all 0.2s ease;
+}
+
+/* Dark mode transitions */
+.dark .video-item {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* Animations */
+.fade-in {
+  animation: fadeIn 0.3s ease-in;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.scale-in {
+  animation: scaleIn 0.2s ease-out;
+}
+
+@keyframes scaleIn {
+  from { transform: scale(0.95); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
