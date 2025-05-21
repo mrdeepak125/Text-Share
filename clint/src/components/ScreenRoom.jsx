@@ -98,11 +98,12 @@ const ScreenRoom = () => {
   useEffect(() => {
     const userId = `user-${Math.random().toString(36).substr(2, 9)}`;
     
-    socketRef.current = io('http://localhost:5000');
+    socketRef.current = io('https://text-share-1.onrender.com');
     peerRef.current = new Peer(userId, {
       host: '/',
-      port: '5000',
+      port: '443',
       path: '/peerjs',
+      secure: true,
     });
 
     // Handle room full event
