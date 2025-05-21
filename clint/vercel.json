@@ -3,6 +3,10 @@
     {
       "source": "/room/:roomId",
       "destination": "/"
+    },
+    {
+      "source": "/screen/:roomId",
+      "destination": "/"
     }
   ]
 }

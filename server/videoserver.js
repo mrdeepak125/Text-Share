@@ -166,30 +166,33 @@ io.on('connection', (socket) => {
     socket.emit('heartbeat-ack');
   });
 
-  // Disconnection handling with cleanup
-  socket.on('disconnect', () => {
-    console.log(`User disconnected: ${socket.id}`);
-    for (const [roomId, room] of rooms) {
-      if (room.users.has(socket.id)) {
-        try {
-          socket.to(roomId).emit('user-disconnected', socket.id);
-          room.users.delete(socket.id);
-          
-          // Clean up empty rooms
-          if (room.users.size === 0) {
-            rooms.delete(roomId);
-            console.log(`Room ${roomId} deleted (empty)`);
-          } else {
-            // Notify remaining users about the updated user list
-            io.to(roomId).emit('users-updated', Array.from(room.users.entries()));
-          }
-        } catch (error) {
-          console.error('Error during disconnection cleanup:', error);
+// Update the 'disconnect' handler in your server code:
+socket.on('disconnect', () => {
+  console.log(`User disconnected: ${socket.id}`);
+  for (const [roomId, room] of rooms) {
+    if (room.users.has(socket.id)) {
+      try {
+        const userId = socket.id;
+        room.users.delete(userId);
+        
+        // Notify all users in the room about the disconnection
+        io.to(roomId).emit('user-disconnected', userId);
+        
+        // Clean up empty rooms
+        if (room.users.size === 0) {
+          rooms.delete(roomId);
+          console.log(`Room ${roomId} deleted (empty)`);
+        } else {
+          // Update the user list for remaining users
+          io.to(roomId).emit('users-updated', Array.from(room.users.entries()));
         }
-        break;
+      } catch (error) {
+        console.error('Error during disconnection cleanup:', error);
       }
+      break;
     }
-  });
+  }
+});
 });
 
 // Add error handling for the HTTP server

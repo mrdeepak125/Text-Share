@@ -142,14 +142,15 @@ const ScreenRoom = () => {
 
   // Initialize connection
   useEffect(() => {
-    socketRef.current = io('http://localhost:5001', {
+    socketRef.current = io('https://text-share-1.onrender.com', {
       path: '/video-socket/'
     });
 
     myPeerRef.current = new Peer(undefined, {
-      host: 'localhost',
-      port: 5001,
-      path: '/video-peerjs'
+      host: 'text-share-1.onrender.com',
+      port: 443,
+      path: '/video-peerjs',
+      secure: true
     });
 
     const initialize = async () => {
