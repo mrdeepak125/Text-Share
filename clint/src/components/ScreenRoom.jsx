@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import io from 'socket.io-client';
 import Peer from 'peerjs';
+import toast, { Toaster } from 'react-hot-toast';
 
 const ScreenRoom = () => {
   const { roomCode } = useParams();
@@ -14,6 +15,9 @@ const ScreenRoom = () => {
   const [speakingUsers, setSpeakingUsers] = useState(new Set());
   const [participantCount, setParticipantCount] = useState(1);
   const [roomFull, setRoomFull] = useState(false);
+  const [remoteMuteStates, setRemoteMuteStates] = useState({});
+  
+  const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
   
   const socketRef = useRef();
   const peerRef = useRef();
@@ -24,23 +28,34 @@ const ScreenRoom = () => {
   const animationRef = useRef();
   const peersRef = useRef({});
 
-  // Detect mobile devices
-  const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-
   // Initialize audio analyzer for visualization
   const initAudioAnalyzer = (stream) => {
-    if (audioContextRef.current) return;
+    if (!stream || !stream.getAudioTracks().length) return;
     
-    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-    const analyser = audioContext.createAnalyser();
-    const source = audioContext.createMediaStreamSource(stream);
-    source.connect(analyser);
-    analyser.fftSize = 32;
-    
-    audioContextRef.current = audioContext;
-    analyserRef.current = analyser;
-    
-    visualizeAudio();
+    try {
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContext) {
+        console.warn('AudioContext not supported');
+        return;
+      }
+
+      if (audioContextRef.current) {
+        audioContextRef.current.close();
+      }
+
+      const audioContext = new AudioContext();
+      const analyser = audioContext.createAnalyser();
+      const source = audioContext.createMediaStreamSource(stream);
+      source.connect(analyser);
+      analyser.fftSize = 32;
+      
+      audioContextRef.current = audioContext;
+      analyserRef.current = analyser;
+      
+      visualizeAudio();
+    } catch (err) {
+      console.error('Audio analyzer error:', err);
+    }
   };
 
   const visualizeAudio = () => {
@@ -54,15 +69,13 @@ const ScreenRoom = () => {
       animationRef.current = requestAnimationFrame(draw);
       analyser.getByteFrequencyData(dataArray);
       
-      // Calculate average volume
       let sum = 0;
       for (let i = 0; i < bufferLength; i++) {
         sum += dataArray[i];
       }
       const average = sum / bufferLength;
       
-      // If volume is above threshold, emit speaking event
-      if (average > 20 && !isMicMuted) {
+      if (average > 20 && !isMicMuted && audioStream?.getAudioTracks()[0]?.enabled) {
         socketRef.current.emit('speaking', true);
       } else {
         socketRef.current.emit('speaking', false);
@@ -78,7 +91,8 @@ const ScreenRoom = () => {
       cancelAnimationFrame(animationRef.current);
     }
     if (audioContextRef.current) {
-      audioContextRef.current.close();
+      audioContextRef.current.close().catch(console.error);
+      audioContextRef.current = null;
     }
     if (screenStream) {
       screenStream.getTracks().forEach(track => track.stop());
@@ -98,17 +112,17 @@ const ScreenRoom = () => {
   useEffect(() => {
     const userId = `user-${Math.random().toString(36).substr(2, 9)}`;
     
-    socketRef.current = io('https://text-share-1.onrender.com');
+    socketRef.current = io('http://localhost:5000');
     peerRef.current = new Peer(userId, {
       host: '/',
-      port: '443',
+      port: '5000',
       path: '/peerjs',
-      secure: true,
     });
 
     // Handle room full event
     socketRef.current.on('room-full', () => {
       setRoomFull(true);
+      toast.error('Room is full (maximum 2 participants allowed)');
     });
 
     // Handle current participants
@@ -119,6 +133,7 @@ const ScreenRoom = () => {
     // Handle participant count updates
     socketRef.current.on('participant-count', (count) => {
       setParticipantCount(count);
+      toast.success(`${count} participants in room`);
     });
 
     // Handle speaking events
@@ -131,6 +146,17 @@ const ScreenRoom = () => {
           newSet.delete(userId);
         }
         return newSet;
+      });
+    });
+
+    // Handle mute state changes
+    socketRef.current.on('user-mute-state', ({ userId, isMuted }) => {
+      setRemoteMuteStates(prev => ({
+        ...prev,
+        [userId]: isMuted
+      }));
+      toast(`${isMuted ? 'Muted' : 'Unmuted'} by ${userId.substring(0, 6)}`, {
+        icon: isMuted ? '🔇' : '🔊'
       });
     });
 
@@ -195,6 +221,7 @@ const ScreenRoom = () => {
       if (peersRef.current[userId]) {
         peersRef.current[userId].close();
       }
+      toast(`${userId.substring(0, 6)} left the room`);
     });
 
     return cleanup;
@@ -202,7 +229,7 @@ const ScreenRoom = () => {
 
   // Handle stream changes
   useEffect(() => {
-    if (userVideoRef.current) {
+    if (userVideoRef.current && screenStream) {
       userVideoRef.current.srcObject = screenStream;
     }
     if (screenAudioRef.current && audioStream) {
@@ -215,44 +242,69 @@ const ScreenRoom = () => {
     try {
       setError(null);
       
-      // Check if getUserMedia is available
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        throw new Error('Audio access not supported on this device');
+      // Check if we're running on HTTPS or localhost
+      const isSecure = window.location.protocol === 'https:' || 
+                       window.location.hostname === 'localhost' || 
+                       window.location.hostname === '127.0.0.1';
+
+      if (!isSecure) {
+        throw new Error('Audio access requires HTTPS or localhost');
       }
 
       let newScreenStream = null;
       let newAudioStream = null;
 
       if (shareScreen) {
-        // Check if screen sharing is supported
-        if (!navigator.mediaDevices.getDisplayMedia) {
-          throw new Error('Screen sharing not supported on this device');
+        try {
+          newScreenStream = await navigator.mediaDevices.getDisplayMedia({
+            video: true,
+            audio: false
+          });
+          
+          newScreenStream.getVideoTracks()[0].onended = () => {
+            stopSharing();
+          };
+        } catch (err) {
+          if (shareAudio) {
+            // If screen sharing fails but audio was requested, continue with audio only
+            toast.error('Screen sharing failed, continuing with audio only');
+          } else {
+            throw err;
+          }
         }
-        
-        newScreenStream = await navigator.mediaDevices.getDisplayMedia({
-          video: true,
-          audio: false
-        });
-        
-        newScreenStream.getVideoTracks()[0].onended = () => {
-          stopSharing();
-        };
       }
 
       if (shareAudio) {
-        newAudioStream = await navigator.mediaDevices.getUserMedia({
-          audio: true,
-          video: false
-        });
+        try {
+          newAudioStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true
+            },
+            video: false
+          });
+        } catch (err) {
+          if (shareScreen && newScreenStream) {
+            // If audio fails but we have screen, continue with screen only
+            toast.error('Microphone access denied, continuing without audio');
+          } else {
+            throw err;
+          }
+        }
       }
 
       setScreenStream(newScreenStream);
       setAudioStream(newAudioStream);
       setIsSharing(true);
+      setIsMicMuted(false);
+      
+      toast.success(`Started ${shareScreen ? 'screen sharing' : 'audio call'}`);
       
     } catch (err) {
       setError(err.message);
       console.error(err);
+      toast.error(err.message);
     }
   };
 
@@ -260,16 +312,25 @@ const ScreenRoom = () => {
     cleanup();
     setIsSharing(false);
     setIsMicMuted(false);
+    toast('Stopped sharing', { icon: '🛑' });
   };
 
   const toggleMic = () => {
     if (audioStream) {
       const audioTracks = audioStream.getAudioTracks();
+      const newMuteState = !audioTracks[0].enabled;
+      
       audioTracks.forEach(track => {
-        track.enabled = !track.enabled;
+        track.enabled = newMuteState;
       });
-      setIsMicMuted(!isMicMuted);
-      socketRef.current.emit('speaking', !isMicMuted);
+      
+      setIsMicMuted(newMuteState);
+      socketRef.current.emit('speaking', !newMuteState);
+      socketRef.current.emit('mute-state', newMuteState);
+      
+      toast(newMuteState ? 'Microphone muted' : 'Microphone unmuted', {
+        icon: newMuteState ? '🔇' : '🔊'
+      });
     }
   };
 
@@ -280,7 +341,7 @@ const ScreenRoom = () => {
   const copyRoomLink = () => {
     const link = `${window.location.origin}/screen/${roomCode}`;
     navigator.clipboard.writeText(link);
-    alert('Room link copied to clipboard!');
+    toast.success('Room link copied to clipboard!');
   };
 
   // Update speaking indicators when speakingUsers changes
@@ -299,6 +360,8 @@ const ScreenRoom = () => {
 
   return (
     <div className="min-h-screen bg-gray-900 text-white p-4">
+      <Toaster position="top-right" />
+      
       <div className="max-w-6xl mx-auto">
         <header className="flex justify-between items-center mb-6">
           <h1 className="text-2xl font-bold text-purple-400">ScreenShare Pro</h1>
