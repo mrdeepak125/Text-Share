@@ -1,686 +1,662 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams } from 'react-router-dom';
+import io from 'socket.io-client';
 import Peer from 'peerjs';
-import { motion, AnimatePresence } from 'framer-motion';
-import { 
-  FiMic, FiMicOff, FiVideo, FiVideoOff, FiMonitor, FiCopy,
-  FiUsers, FiMessageSquare, FiSend, FiX
-} from 'react-icons/fi';
-import { IoMdExit } from 'react-icons/io';
-import { BsArrowsFullscreen } from 'react-icons/bs';
-import toast from 'react-hot-toast';
-import { LuMonitorOff } from "react-icons/lu";
-import { io } from 'socket.io-client';
-import Avatar from 'react-avatar';
 
 const ScreenRoom = () => {
-  const { roomId } = useParams();
-  const [peers, setPeers] = useState({});
-  const [myStream, setMyStream] = useState(null);
+  const { roomCode } = useParams();
   const [screenStream, setScreenStream] = useState(null);
-  const [isAudioMuted, setIsAudioMuted] = useState(false);
-  const [isVideoOff, setIsVideoOff] = useState(false);
-  const [isScreenSharing, setIsScreenSharing] = useState(false);
-  const [messages, setMessages] = useState([]);
-  const [newMessage, setNewMessage] = useState('');
-  const [users, setUsers] = useState([]);
-  const [fullscreenPeer, setFullscreenPeer] = useState(null);
-  const [myPeerId, setMyPeerId] = useState('');
-  const [showChat, setShowChat] = useState(false);
-  const [mediaPermissionGranted, setMediaPermissionGranted] = useState(false);
-  const [activeUsers, setActiveUsers] = useState(0);
-  const [screenShareSupported, setScreenShareSupported] = useState(true);
-
-  const myVideoRef = useRef();
-  const myScreenRef = useRef();
-  const peersRef = useRef({});
+  const [audioStream, setAudioStream] = useState(null);
+  const [isSharing, setIsSharing] = useState(false);
+  const [isMicMuted, setIsMicMuted] = useState(false);
+  const [error, setError] = useState(null);
+  const [participants, setParticipants] = useState([]);
+  const [speakingUsers, setSpeakingUsers] = useState(new Set());
+  const [participantCount, setParticipantCount] = useState(1);
+  const [roomFull, setRoomFull] = useState(false);
+  
   const socketRef = useRef();
-  const myPeerRef = useRef();
-  const messagesEndRef = useRef();
+  const peerRef = useRef();
+  const userVideoRef = useRef();
+  const screenAudioRef = useRef();
+  const audioContextRef = useRef();
+  const analyserRef = useRef();
+  const animationRef = useRef();
+  const peersRef = useRef({});
 
-  // Scroll to bottom of messages
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  // Detect mobile devices
+  const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+
+  // Initialize audio analyzer for visualization
+  const initAudioAnalyzer = (stream) => {
+    if (audioContextRef.current) return;
+    
+    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    const analyser = audioContext.createAnalyser();
+    const source = audioContext.createMediaStreamSource(stream);
+    source.connect(analyser);
+    analyser.fftSize = 32;
+    
+    audioContextRef.current = audioContext;
+    analyserRef.current = analyser;
+    
+    visualizeAudio();
   };
 
-  useEffect(() => {
-    // Check if screen sharing is supported
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-      setScreenShareSupported(false);
-      toast.error("Screen sharing not supported in this browser");
-    }
-  }, []);
-
-  const initMedia = useCallback(async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: true, 
-        audio: true 
-      }).catch(err => {
-        console.error("User denied media access", err);
-        throw err;
-      });
+  const visualizeAudio = () => {
+    if (!analyserRef.current) return;
+    
+    const analyser = analyserRef.current;
+    const bufferLength = analyser.frequencyBinCount;
+    const dataArray = new Uint8Array(bufferLength);
+    
+    const draw = () => {
+      animationRef.current = requestAnimationFrame(draw);
+      analyser.getByteFrequencyData(dataArray);
       
-      setMyStream(stream);
-      if (myVideoRef.current) {
-        myVideoRef.current.srcObject = stream;
+      // Calculate average volume
+      let sum = 0;
+      for (let i = 0; i < bufferLength; i++) {
+        sum += dataArray[i];
       }
-      setMediaPermissionGranted(true);
-
-      return stream;
-    } catch (err) {
-      console.error("Failed to get media devices", err);
-      toast.error("Could not access camera/microphone. Please check your permissions.");
-      setMediaPermissionGranted(false);
-      return null;
-    }
-  }, []);
-
-  const setupPeerConnections = useCallback((stream) => {
-    myPeerRef.current.on('open', id => {
-      setMyPeerId(id);
-      socketRef.current.emit('join-video-room', roomId, id);
-    });
-
-    myPeerRef.current.on('call', call => {
-      const streamToAnswerWith = isScreenSharing && screenStream ? screenStream : stream;
-      call.answer(streamToAnswerWith || undefined);
-      call.on('stream', userStream => {
-        addPeer(call.peer, userStream, call.metadata?.isScreen);
-      });
-    });
-
-    socketRef.current.on('user-connected', userId => {
-      toast.success(`New user joined: ${userId.slice(0, 5)}`);
-      if (stream) {
-        connectToNewUser(userId, stream);
+      const average = sum / bufferLength;
+      
+      // If volume is above threshold, emit speaking event
+      if (average > 20 && !isMicMuted) {
+        socketRef.current.emit('speaking', true);
+      } else {
+        socketRef.current.emit('speaking', false);
       }
-    });
-
-    socketRef.current.on('user-disconnected', userId => {
-      toast.error(`User left: ${userId.slice(0, 5)}`);
-      removePeer(userId);
-    });
-
-    socketRef.current.on('room-state', ({ users, messages }) => {
-      setUsers(users);
-      setMessages(messages || []);
-      setActiveUsers(users.length);
-    });
-
-    socketRef.current.on('new-message', (message) => {
-      setMessages(prev => [...prev, message]);
-    });
-
-    socketRef.current.on('users-updated', (users) => {
-      setUsers(users);
-      setActiveUsers(users.length);
-    });
-
-    socketRef.current.on('media-state-update', (userId, state) => {
-      setUsers(prev => prev.map(user => 
-        user[0] === userId ? [user[0], { ...user[1], ...state }] : user
-      ));
-    });
-
-    socketRef.current.on('screen-sharing', (userId, isSharing) => {
-      setUsers(prev => prev.map(user => 
-        user[0] === userId ? [user[0], { ...user[1], screenSharing: isSharing }] : user
-      ));
-      if (isSharing) {
-        toast.info(`User ${userId.slice(0, 5)} started screen sharing`);
-      }
-    });
-
-    socketRef.current.on('screen-sharing-status', ({ success, error }) => {
-      if (!success) {
-        setIsScreenSharing(false);
-        toast.error(error || "Screen sharing failed");
-      }
-    });
-  }, [roomId, isScreenSharing, screenStream]);
-
-  // Initialize connection
-  useEffect(() => {
-    socketRef.current = io('https://text-share-1.onrender.com', {
-      path: '/video-socket/'
-    });
-
-    myPeerRef.current = new Peer(undefined, {
-      host: 'text-share-1.onrender.com',
-      port: 443,
-      path: '/video-peerjs',
-      secure: true
-    });
-
-    const initialize = async () => {
-      const stream = await initMedia();
-      setupPeerConnections(stream);
     };
-
-    initialize();
-
-    return () => {
-      if (myStream) myStream.getTracks().forEach(track => track.stop());
-      if (screenStream) screenStream.getTracks().forEach(track => track.stop());
-      socketRef.current.disconnect();
-      if (myPeerRef.current) myPeerRef.current.destroy();
-    };
-  }, [initMedia, setupPeerConnections]);
-
-  useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
-
-  const connectToNewUser = (userId, stream) => {
-    const call = myPeerRef.current.call(userId, isScreenSharing && screenStream ? screenStream : stream, {
-      metadata: { isScreen: isScreenSharing }
-    });
-    call.on('stream', userStream => {
-      addPeer(userId, userStream, isScreenSharing);
-    });
-    call.on('close', () => {
-      removePeer(userId);
-    });
-    peersRef.current[userId] = call;
+    
+    draw();
   };
 
-  const addPeer = (userId, stream, isScreen = false) => {
-    setPeers(prev => ({
-      ...prev,
-      [userId]: { stream, isScreen }
-    }));
-  };
-
-  const removePeer = (userId) => {
-    setPeers(prev => {
-      const newPeers = { ...prev };
-      delete newPeers[userId];
-      return newPeers;
-    });
-  };
-
-  const toggleAudio = () => {
-    if (myStream) {
-      const newState = !isAudioMuted;
-      myStream.getAudioTracks()[0].enabled = newState;
-      setIsAudioMuted(newState);
-      socketRef.current.emit('media-state', roomId, myPeerId, { muted: newState });
+  // Cleanup resources
+  const cleanup = () => {
+    if (animationRef.current) {
+      cancelAnimationFrame(animationRef.current);
     }
-  };
-
-  const toggleVideo = () => {
-    if (myStream) {
-      const newState = !isVideoOff;
-      myStream.getVideoTracks()[0].enabled = newState;
-      setIsVideoOff(newState);
-      socketRef.current.emit('media-state', roomId, myPeerId, { videoOff: newState });
+    if (audioContextRef.current) {
+      audioContextRef.current.close();
     }
-  };
-
-  const toggleScreenShare = async () => {
-    if (isScreenSharing) {
-      stopScreenShare();
-    } else {
-      try {
-        await startScreenShare();
-      } catch (err) {
-        console.error("Screen sharing failed:", err);
-        toast.error("Could not start screen sharing. Please check your permissions.");
-      }
-    }
-  };
-
-  const startScreenShare = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({ 
-        video: true,
-        audio: true 
-      }).catch(err => {
-        console.error("User denied screen share", err);
-        throw err;
-      });
-
-      // User might close the screen share picker without selecting anything
-      if (!stream.getVideoTracks().length) {
-        stream.getTracks().forEach(track => track.stop());
-        throw new Error("No screen selected");
-      }
-
-      setScreenStream(stream);
-      setIsScreenSharing(true);
-      if (myScreenRef.current) myScreenRef.current.srcObject = stream;
-      socketRef.current.emit('screen-sharing', roomId, myPeerId, true);
-
-      // Replace all peer connections with screen stream
-      Object.keys(peersRef.current).forEach(userId => {
-        peersRef.current[userId].close();
-        const call = myPeerRef.current.call(userId, stream, {
-          metadata: { isScreen: true }
-        });
-        call.on('stream', userStream => {
-          addPeer(userId, userStream, true);
-        });
-        peersRef.current[userId] = call;
-      });
-
-      // Handle screen share ending
-      stream.getVideoTracks()[0].onended = () => {
-        stopScreenShare();
-        toast.info("Screen sharing stopped");
-      };
-
-      return stream;
-    } catch (err) {
-      console.error("Screen sharing failed", err);
-      toast.error("Screen sharing failed or was denied");
-      throw err;
-    }
-  };
-
-  const stopScreenShare = () => {
     if (screenStream) {
       screenStream.getTracks().forEach(track => track.stop());
-      setScreenStream(null);
-      setIsScreenSharing(false);
-      socketRef.current.emit('screen-sharing', roomId, myPeerId, false);
+    }
+    if (audioStream) {
+      audioStream.getTracks().forEach(track => track.stop());
+    }
+    if (socketRef.current) {
+      socketRef.current.disconnect();
+    }
+    if (peerRef.current) {
+      peerRef.current.destroy();
+    }
+  };
 
-      // Switch back to camera for all peers
-      if (myStream) {
-        Object.keys(peersRef.current).forEach(userId => {
-          peersRef.current[userId].close();
-          connectToNewUser(userId, myStream);
+  // Initialize peer and socket connections
+  useEffect(() => {
+    const userId = `user-${Math.random().toString(36).substr(2, 9)}`;
+    
+    socketRef.current = io('http://localhost:5000');
+    peerRef.current = new Peer(userId, {
+      host: '/',
+      port: '5000',
+      path: '/peerjs',
+    });
+
+    // Handle room full event
+    socketRef.current.on('room-full', () => {
+      setRoomFull(true);
+    });
+
+    // Handle current participants
+    socketRef.current.on('current-participants', (participantIds) => {
+      setParticipants(participantIds);
+    });
+
+    // Handle participant count updates
+    socketRef.current.on('participant-count', (count) => {
+      setParticipantCount(count);
+    });
+
+    // Handle speaking events
+    socketRef.current.on('user-speaking', ({ userId, isSpeaking }) => {
+      setSpeakingUsers(prev => {
+        const newSet = new Set(prev);
+        if (isSpeaking) {
+          newSet.add(userId);
+        } else {
+          newSet.delete(userId);
+        }
+        return newSet;
+      });
+    });
+
+    peerRef.current.on('open', () => {
+      socketRef.current.emit('join-room', roomCode, userId);
+    });
+
+    peerRef.current.on('call', (call) => {
+      const streamToSend = screenStream || audioStream;
+      call.answer(streamToSend || null);
+      
+      call.on('stream', (remoteStream) => {
+        const peerId = call.peer;
+        peersRef.current[peerId] = call;
+        
+        setParticipants(prev => [...prev, peerId]);
+
+        // Create video/audio element for remote peer
+        const container = document.getElementById('remote-peers');
+        const mediaElement = remoteStream.getVideoTracks().length > 0 ? 
+          document.createElement('video') : 
+          document.createElement('audio');
+        
+        mediaElement.srcObject = remoteStream;
+        mediaElement.autoplay = true;
+        mediaElement.className = 'w-full h-full rounded-lg object-cover';
+        mediaElement.id = `media-${peerId}`;
+        
+        // Add border when speaking
+        if (speakingUsers.has(peerId)) {
+          mediaElement.classList.add('border-2', 'border-green-500');
+        }
+        
+        container.appendChild(mediaElement);
+      });
+
+      call.on('close', () => {
+        const peerId = call.peer;
+        delete peersRef.current[peerId];
+        setParticipants(prev => prev.filter(id => id !== peerId));
+        
+        const mediaElement = document.getElementById(`media-${peerId}`);
+        if (mediaElement) {
+          mediaElement.remove();
+        }
+      });
+    });
+
+    socketRef.current.on('user-connected', (userId) => {
+      const streamToSend = screenStream || audioStream;
+      if (!streamToSend) return;
+      
+      const call = peerRef.current.call(userId, streamToSend);
+      call.on('close', () => {
+        delete peersRef.current[userId];
+        setParticipants(prev => prev.filter(id => id !== userId));
+      });
+      peersRef.current[userId] = call;
+    });
+
+    socketRef.current.on('user-disconnected', (userId) => {
+      if (peersRef.current[userId]) {
+        peersRef.current[userId].close();
+      }
+    });
+
+    return cleanup;
+  }, [roomCode]);
+
+  // Handle stream changes
+  useEffect(() => {
+    if (userVideoRef.current) {
+      userVideoRef.current.srcObject = screenStream;
+    }
+    if (screenAudioRef.current && audioStream) {
+      screenAudioRef.current.srcObject = audioStream;
+      initAudioAnalyzer(audioStream);
+    }
+  }, [screenStream, audioStream]);
+
+  const startSharing = async (shareScreen = true, shareAudio = true) => {
+    try {
+      setError(null);
+      
+      // Check if getUserMedia is available
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error('Audio access not supported on this device');
+      }
+
+      let newScreenStream = null;
+      let newAudioStream = null;
+
+      if (shareScreen) {
+        // Check if screen sharing is supported
+        if (!navigator.mediaDevices.getDisplayMedia) {
+          throw new Error('Screen sharing not supported on this device');
+        }
+        
+        newScreenStream = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: false
+        });
+        
+        newScreenStream.getVideoTracks()[0].onended = () => {
+          stopSharing();
+        };
+      }
+
+      if (shareAudio) {
+        newAudioStream = await navigator.mediaDevices.getUserMedia({
+          audio: true,
+          video: false
         });
       }
+
+      setScreenStream(newScreenStream);
+      setAudioStream(newAudioStream);
+      setIsSharing(true);
+      
+    } catch (err) {
+      setError(err.message);
+      console.error(err);
     }
   };
 
-  const handleSendMessage = () => {
-    if (newMessage.trim() === '') return;
-    
-    const message = {
-      id: Date.now(),
-      senderId: myPeerId,
-      text: newMessage,
-      timestamp: new Date().toISOString()
-    };
-    
-    socketRef.current.emit('send-message', roomId, message);
-    setNewMessage('');
+  const stopSharing = () => {
+    cleanup();
+    setIsSharing(false);
+    setIsMicMuted(false);
   };
 
-  const handleKeyPress = (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSendMessage();
+  const toggleMic = () => {
+    if (audioStream) {
+      const audioTracks = audioStream.getAudioTracks();
+      audioTracks.forEach(track => {
+        track.enabled = !track.enabled;
+      });
+      setIsMicMuted(!isMicMuted);
+      socketRef.current.emit('speaking', !isMicMuted);
     }
   };
 
-  const copyRoomId = () => {
-    navigator.clipboard.writeText(roomId);
-    toast.success('Room ID copied!');
+  const startAudioOnly = () => {
+    startSharing(false, true);
   };
 
-  const leaveRoom = () => {
-    window.location.href = '/';
+  const copyRoomLink = () => {
+    const link = `${window.location.origin}/screen/${roomCode}`;
+    navigator.clipboard.writeText(link);
+    alert('Room link copied to clipboard!');
   };
 
-  const toggleFullscreen = (userId) => {
-    setFullscreenPeer(prev => prev === userId ? null : userId);
-  };
-
-  const getUserState = (userId) => {
-    return users.find(user => user[0] === userId)?.[1] || {};
-  };
-
-  const getAvatarProps = (userId) => {
-    const colors = ['#FF6633', '#FFB399', '#FF33FF', '#FFFF99', '#00B3E6'];
-    const color = colors[parseInt(userId.slice(-1)) % colors.length];
-    return {
-      name: `User ${userId.slice(0, 5)}`,
-      size: "40",
-      round: true,
-      color
-    };
-  };
+  // Update speaking indicators when speakingUsers changes
+  useEffect(() => {
+    participants.forEach(peerId => {
+      const mediaElement = document.getElementById(`media-${peerId}`);
+      if (mediaElement) {
+        if (speakingUsers.has(peerId)) {
+          mediaElement.classList.add('border-2', 'border-green-500');
+        } else {
+          mediaElement.classList.remove('border-2', 'border-green-500');
+        }
+      }
+    });
+  }, [speakingUsers, participants]);
 
   return (
-    <div className="flex flex-col h-screen bg-gray-100 dark:bg-gray-900 text-gray-800 dark:text-gray-200">
-      {/* Header */}
-      <header className="bg-white dark:bg-gray-800 shadow-sm p-4 flex justify-between items-center">
-        <div className="flex items-center space-x-4">
-          <h1 className="text-xl font-bold text-blue-600 dark:text-blue-400">Video Chat Room</h1>
-          <div className="flex items-center space-x-2 bg-gray-100 dark:bg-gray-700 px-3 py-1 rounded-full">
-            <FiUsers className="text-gray-500 dark:text-gray-300" />
-            <span className="font-medium">{activeUsers} online</span>
-          </div>
-        </div>
-        <div className="flex items-center space-x-3">
-          <button
-            onClick={() => setShowChat(!showChat)}
-            className="md:hidden flex items-center space-x-1 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 p-2 rounded-full transition-colors"
-          >
-            {showChat ? <FiX size={18} /> : <FiMessageSquare size={18} />}
-          </button>
-          <button
-            onClick={copyRoomId}
-            className="hidden md:flex items-center space-x-1 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 px-3 py-1 rounded-full transition-colors"
-          >
-            <FiCopy className="text-blue-500" />
-            <span>Copy Room ID</span>
-          </button>
-          <button
-            onClick={leaveRoom}
-            className="flex items-center space-x-1 bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded-full transition-colors"
-          >
-            <IoMdExit />
-            <span>Leave</span>
-          </button>
-        </div>
-      </header>
-
-      {/* Main Content */}
-      <div className="flex flex-1 overflow-hidden">
-        {/* Video Grid */}
-        <div className={`${fullscreenPeer || showChat ? 'hidden md:block md:flex-1' : 'flex-1'} bg-gray-200 dark:bg-gray-800 p-4 overflow-auto`}>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {/* My Video */}
-            <motion.div 
-              layout
-              className={`relative bg-black rounded-lg overflow-hidden ${fullscreenPeer === myPeerId ? 'hidden' : ''}`}
-              initial={{ opacity: 0, scale: 0.9 }}
-              animate={{ opacity: 1, scale: 1 }}
-              transition={{ duration: 0.3 }}
-            >
-              {!mediaPermissionGranted ? (
-                <div className="w-full h-full flex flex-col items-center justify-center bg-gray-800 p-4">
-                  <div className="text-red-500 mb-2 text-center">
-                    <FiVideoOff size={32} className="mx-auto" />
-                    <p className="mt-2">Camera/microphone access denied</p>
-                  </div>
-                  <button 
-                    onClick={initMedia}
-                    className="mt-2 bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded"
-                  >
-                    Retry Permissions
-                  </button>
-                </div>
-              ) : isVideoOff ? (
-                <div className="w-full h-full flex items-center justify-center bg-gray-800">
-                  <Avatar {...getAvatarProps(myPeerId)} size="80" />
-                </div>
-              ) : (
-                <video
-                  ref={myVideoRef}
-                  autoPlay
-                  muted
-                  className="w-full h-full object-cover"
-                />
-              )}
-              <div className="absolute bottom-2 left-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded text-sm">
-                You {isAudioMuted && '(Muted)'} {isVideoOff && '(Camera Off)'}
-              </div>
-              <div className="absolute top-2 right-2 flex space-x-1">
-                <button
-                  onClick={toggleAudio}
-                  className={`p-1 rounded-full ${isAudioMuted ? 'bg-red-500' : 'bg-gray-700 bg-opacity-70'} text-white`}
-                >
-                  {isAudioMuted ? <FiMicOff size={16} /> : <FiMic size={16} />}
-                </button>
-                <button
-                  onClick={toggleVideo}
-                  className={`p-1 rounded-full ${isVideoOff ? 'bg-red-500' : 'bg-gray-700 bg-opacity-70'} text-white`}
-                >
-                  {isVideoOff ? <FiVideoOff size={16} /> : <FiVideo size={16} />}
-                </button>
-              </div>
-            </motion.div>
-
-            {/* My Screen Share (only visible to others) */}
-            {isScreenSharing && (
-              <motion.div
-                layout
-                className="relative bg-black rounded-lg overflow-hidden"
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                transition={{ duration: 0.3 }}
-              >
-                <video
-                  ref={myScreenRef}
-                  autoPlay
-                  muted
-                  className="w-full h-full object-cover"
-                />
-                <div className="absolute bottom-2 left-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded text-sm">
-                  Your Screen
-                </div>
-              </motion.div>
-            )}
-
-            {/* Other Participants */}
-            {Object.entries(peers).map(([userId, { stream, isScreen }]) => {
-              const userState = getUserState(userId);
-              return (
-                <motion.div
-                  key={userId}
-                  layout
-                  className={`relative bg-black rounded-lg overflow-hidden ${fullscreenPeer === userId ? 'hidden' : ''}`}
-                  initial={{ opacity: 0, scale: 0.9 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  transition={{ duration: 0.3 }}
-                >
-                  {userState.videoOff && !isScreen ? (
-                    <div className="w-full h-full flex items-center justify-center bg-gray-800">
-                      <Avatar {...getAvatarProps(userId)} size="80" />
-                    </div>
-                  ) : (
-                    <video
-                      autoPlay
-                      className="w-full h-full object-cover"
-                      ref={videoRef => {
-                        if (videoRef) videoRef.srcObject = stream;
-                      }}
-                    />
-                  )}
-                  <div className="absolute bottom-2 left-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded text-sm">
-                    {isScreen ? `Screen (${userId.slice(0, 5)})` : `User ${userId.slice(0, 5)}`}
-                    {userState.muted && !isScreen && ' (Muted)'}
-                    {userState.videoOff && !isScreen && ' (Camera Off)'}
-                  </div>
-                  <button
-                    onClick={() => toggleFullscreen(userId)}
-                    className="absolute top-2 right-2 p-1 bg-gray-700 bg-opacity-70 text-white rounded-full"
-                  >
-                    <BsArrowsFullscreen size={16} />
-                  </button>
-                </motion.div>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Fullscreen View */}
-        {fullscreenPeer && (
-          <div className="flex-1 bg-gray-800 relative">
-            <AnimatePresence>
-              <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                className="absolute inset-0 flex items-center justify-center bg-black"
-              >
-                {fullscreenPeer === myPeerId ? (
-                  isVideoOff ? (
-                    <div className="flex flex-col items-center">
-                      <Avatar {...getAvatarProps(myPeerId)} size="100" />
-                      <div className="mt-4 text-white">Your camera is off</div>
-                    </div>
-                  ) : (
-                    <video
-                      ref={myVideoRef}
-                      autoPlay
-                      muted
-                      className="max-w-full max-h-full"
-                    />
-                  )
-                ) : (
-                  peers[fullscreenPeer]?.isScreen ? (
-                    <video
-                      autoPlay
-                      className="max-w-full max-h-full"
-                      ref={videoRef => {
-                        if (videoRef && peers[fullscreenPeer]) {
-                          videoRef.srcObject = peers[fullscreenPeer].stream;
-                        }
-                      }}
-                    />
-                  ) : getUserState(fullscreenPeer).videoOff ? (
-                    <div className="flex flex-col items-center">
-                      <Avatar {...getAvatarProps(fullscreenPeer)} size="100" />
-                      <div className="mt-4 text-white">User&apos;s camera is off</div>
-                    </div>
-                  ) : (
-                    <video
-                      autoPlay
-                      className="max-w-full max-h-full"
-                      ref={videoRef => {
-                        if (videoRef && peers[fullscreenPeer]) {
-                          videoRef.srcObject = peers[fullscreenPeer].stream;
-                        }
-                      }}
-                    />
-                  )
-                )}
-                <button
-                  onClick={() => setFullscreenPeer(null)}
-                  className="absolute top-4 right-4 bg-gray-700 bg-opacity-70 text-white p-2 rounded-full hover:bg-gray-600 transition-colors"
-                >
-                  <BsArrowsFullscreen size={20} />
-                </button>
-                <div className="absolute bottom-4 left-4 bg-black bg-opacity-50 text-white px-3 py-1 rounded">
-                  {fullscreenPeer === myPeerId 
-                    ? `You ${isAudioMuted ? '(Muted)' : ''} ${isVideoOff ? '(Camera Off)' : ''}`
-                    : `User ${fullscreenPeer.slice(0, 5)}`}
-                </div>
-              </motion.div>
-            </AnimatePresence>
-          </div>
-        )}
-
-        {/* Chat Panel */}
-        <div className={`${showChat ? 'block' : 'hidden'} md:block ${fullscreenPeer ? 'hidden md:block md:w-1/3' : 'w-full md:w-1/3'} bg-white dark:bg-gray-800 border-l dark:border-gray-700 flex flex-col`}>
-          <div className="p-4 border-b dark:border-gray-700 flex items-center justify-between">
-            <h2 className="font-semibold flex items-center">
-              <FiMessageSquare className="mr-2" />
-              Chat ({activeUsers} online)
-            </h2>
+    <div className="min-h-screen bg-gray-900 text-white p-4">
+      <div className="max-w-6xl mx-auto">
+        <header className="flex justify-between items-center mb-6">
+          <h1 className="text-2xl font-bold text-purple-400">ScreenShare Pro</h1>
+          <div className="flex items-center space-x-4">
+            <span className="bg-gray-700 px-3 py-1 rounded-full text-sm">
+              Room: {roomCode} ({participantCount}/2)
+            </span>
             <button
-              onClick={() => setShowChat(false)}
-              className="md:hidden p-1 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700"
+              onClick={copyRoomLink}
+              className="bg-purple-600 hover:bg-purple-700 px-4 py-2 rounded-lg transition"
             >
-              <FiX size={18} />
+              Copy Room Link
             </button>
           </div>
-          <div className="flex-1 p-4 overflow-auto">
-            <div className="space-y-4">
-              {messages.map((message) => (
-                <div 
-                  key={message.id} 
-                  className={`flex ${message.senderId === myPeerId ? 'justify-end' : 'justify-start'}`}
-                >
-                  <div className={`max-w-xs md:max-w-md rounded-lg p-3 ${message.senderId === myPeerId 
-                    ? 'bg-blue-500 text-white' 
-                    : 'bg-gray-200 dark:bg-gray-700'}`}
-                  >
-                    <div className="flex items-center space-x-2">
-                      <Avatar {...getAvatarProps(message.senderId)} size="24" />
-                      <div>
-                        <div className="text-xs font-semibold">
-                          {message.senderId === myPeerId ? 'You' : `User ${message.senderId.slice(0, 5)}`}
+        </header>
+
+        {roomFull ? (
+          <div className="bg-red-600 text-white p-4 rounded-lg mb-6">
+            Room is full (maximum 2 participants allowed)
+          </div>
+        ) : (
+          <main className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div className="lg:col-span-2 space-y-6">
+              {/* Local Screen/Audio Preview */}
+              <div className="bg-gray-800 rounded-xl overflow-hidden shadow-lg">
+                <div className="p-4 bg-gray-700 flex justify-between items-center">
+                  <h2 className="font-semibold">
+                    {screenStream ? 'Your Screen' : 'Your Audio'}
+                  </h2>
+                  {isSharing && (
+                    <div className="flex items-center space-x-3">
+                      <span className="flex items-center">
+                        <span className="w-2 h-2 bg-green-500 rounded-full mr-2"></span>
+                        <span className="text-sm">Live</span>
+                      </span>
+                      {audioStream && (
+                        <div className="flex space-x-1 items-center">
+                          {Array.from({ length: 4 }).map((_, i) => (
+                            <div 
+                              key={i}
+                              className={`w-1 h-1 rounded-full ${speakingUsers.has(peerRef.current?.id) ? 'bg-green-500' : 'bg-gray-500'}`}
+                              style={{
+                                height: speakingUsers.has(peerRef.current?.id) ? 
+                                  `${Math.random() * 6 + 2}px` : '2px'
+                              }}
+                            />
+                          ))}
                         </div>
-                        <div className="mt-1">{message.text}</div>
-                        <div className="text-xs mt-1 opacity-70">
-                          {new Date(message.timestamp).toLocaleTimeString()}
+                      )}
+                    </div>
+                  )}
+                </div>
+                <div className="aspect-video bg-black flex items-center justify-center">
+                  {isSharing ? (
+                    screenStream ? (
+                      <video
+                        ref={userVideoRef}
+                        autoPlay
+                        muted
+                        className={`w-full h-full object-contain bg-black ${speakingUsers.has(peerRef.current?.id) ? 'border-2 border-green-500' : ''}`}
+                      />
+                    ) : (
+                      <div className={`w-full h-full flex items-center justify-center ${speakingUsers.has(peerRef.current?.id) ? 'border-2 border-green-500' : ''}`}>
+                        <div className="text-center p-8 text-gray-400">
+                          <div className="flex justify-center space-x-1 mb-4">
+                            {Array.from({ length: 5 }).map((_, i) => (
+                              <div 
+                                key={i}
+                                className="w-1 h-6 bg-green-500 rounded-full"
+                                style={{
+                                  height: speakingUsers.has(peerRef.current?.id) ? 
+                                    `${Math.random() * 12 + 4}px` : '4px'
+                                }}
+                              />
+                            ))}
+                          </div>
+                          <p>Audio only mode</p>
+                          <p className="text-sm">Your microphone is active</p>
+                        </div>
+                      </div>
+                    )
+                  ) : (
+                    <div className="text-center p-8 text-gray-400">
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        className="h-12 w-12 mx-auto mb-4"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"
+                        />
+                      </svg>
+                      <p>Your {screenStream ? 'screen' : 'audio'} will appear here</p>
+                    </div>
+                  )}
+                </div>
+                <div className="p-4 bg-gray-700 flex flex-wrap justify-center gap-4">
+                  {!isSharing ? (
+                    <>
+                      <button
+                        onClick={() => startSharing(true, true)}
+                        disabled={isMobile}
+                        className={`bg-green-600 hover:bg-green-700 px-6 py-3 rounded-lg font-medium flex items-center transition ${isMobile ? 'opacity-50 cursor-not-allowed' : ''}`}
+                      >
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          className="h-5 w-5 mr-2"
+                          viewBox="0 0 20 20"
+                          fill="currentColor"
+                        >
+                          <path
+                            fillRule="evenodd"
+                            d="M4 5a2 2 0 00-2 2v8a2 2 0 002 2h12a2 2 0 002-2V7a2 2 0 00-2-2h-1.586a1 1 0 01-.707-.293l-1.121-1.121A2 2 0 0011.172 3H8.828a2 2 0 00-1.414.586L6.293 4.707A1 1 0 015.586 5H4zm6 9a3 3 0 100-6 3 3 0 000 6z"
+                            clipRule="evenodd"
+                          />
+                        </svg>
+                        Share Screen + Audio
+                      </button>
+                      <button
+                        onClick={startAudioOnly}
+                        className="bg-blue-600 hover:bg-blue-700 px-6 py-3 rounded-lg font-medium flex items-center transition"
+                      >
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          className="h-5 w-5 mr-2"
+                          viewBox="0 0 20 20"
+                          fill="currentColor"
+                        >
+                          <path
+                            fillRule="evenodd"
+                            d="M7 4a3 3 0 016 0v4a3 3 0 11-6 0V4zm4 10.93A7.001 7.001 0 0017 8a1 1 0 10-2 0A5 5 0 015 8a1 1 0 00-2 0 7.001 7.001 0 006 6.93V17H6a1 1 0 100 2h8a1 1 0 100-2h-3v-2.07z"
+                            clipRule="evenodd"
+                          />
+                        </svg>
+                        Audio Only
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        onClick={stopSharing}
+                        className="bg-red-600 hover:bg-red-700 px-6 py-3 rounded-lg font-medium flex items-center transition"
+                      >
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          className="h-5 w-5 mr-2"
+                          viewBox="0 0 20 20"
+                          fill="currentColor"
+                        >
+                          <path
+                            fillRule="evenodd"
+                            d="M10 18a8 8 0 100-16 8 8 0 000 16zM8 7a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1V8a1 1 0 00-1-1H8z"
+                            clipRule="evenodd"
+                          />
+                        </svg>
+                        Stop Sharing
+                      </button>
+                      {audioStream && (
+                        <button
+                          onClick={toggleMic}
+                          className={`px-6 py-3 rounded-lg font-medium flex items-center transition ${
+                            isMicMuted ? 'bg-gray-600 hover:bg-gray-700' : 'bg-green-600 hover:bg-green-700'
+                          }`}
+                        >
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            className="h-5 w-5 mr-2"
+                            viewBox="0 0 20 20"
+                            fill="currentColor"
+                          >
+                            {isMicMuted ? (
+                              <path
+                                fillRule="evenodd"
+                                d="M9.383 3.076A1 1 0 0110 4v12a1 1 0 01-1.707.707L4.586 13H2a1 1 0 01-1-1V8a1 1 0 011-1h2.586l3.707-3.707a1 1 0 011.09-.217zM14.657 2.929a1 1 0 011.414 0A9.972 9.972 0 0119 10a9.972 9.972 0 01-2.929 7.071 1 1 0 01-1.414-1.414A7.971 7.971 0 0017 10c0-2.21-.894-4.208-2.343-5.657a1 1 0 010-1.414zm-2.829 2.828a1 1 0 011.415 0A5.983 5.983 0 0115 10a5.984 5.984 0 01-1.757 4.243 1 1 0 01-1.415-1.415A3.984 3.984 0 0013 10a3.983 3.983 0 00-1.172-2.828 1 1 0 010-1.415z"
+                                clipRule="evenodd"
+                              />
+                            ) : (
+                              <path
+                                fillRule="evenodd"
+                                d="M7 4a3 3 0 016 0v4a3 3 0 11-6 0V4zm4 10.93A7.001 7.001 0 0017 8a1 1 0 10-2 0A5 5 0 015 8a1 1 0 00-2 0 7.001 7.001 0 006 6.93V17H6a1 1 0 100 2h8a1 1 0 100-2h-3v-2.07z"
+                                clipRule="evenodd"
+                              />
+                            )}
+                          </svg>
+                          {isMicMuted ? 'Unmute Mic' : 'Mute Mic'}
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {/* Remote Participants */}
+              <div className="bg-gray-800 rounded-xl overflow-hidden shadow-lg">
+                <div className="p-4 bg-gray-700 flex justify-between items-center">
+                  <h2 className="font-semibold">Participants ({participants.length})</h2>
+                </div>
+                <div
+                  id="remote-peers"
+                  className="grid grid-cols-1 md:grid-cols-2 gap-4 p-4 min-h-[200px]"
+                >
+                  {participants.length === 0 && (
+                    <div className="col-span-full text-center p-8 text-gray-400">
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        className="h-12 w-12 mx-auto mb-4"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"
+                        />
+                      </svg>
+                      <p>Other participants will appear here when they join</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Sidebar */}
+            <div className="space-y-6">
+              {/* Room Info */}
+              <div className="bg-gray-800 rounded-xl p-6 shadow-lg">
+                <h2 className="font-semibold text-lg mb-4 text-purple-300">
+                  Room Information
+                </h2>
+                <div className="space-y-3">
+                  <div>
+                    <p className="text-sm text-gray-400">Room Code</p>
+                    <p className="font-mono bg-gray-700 px-3 py-2 rounded">
+                      {roomCode}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-gray-400">Status</p>
+                    <p className="flex items-center">
+                      {isSharing ? (
+                        <>
+                          <span className="w-2 h-2 bg-green-500 rounded-full mr-2"></span>
+                          <span>
+                            {screenStream ? 'Sharing screen' : 'Sharing audio'}
+                            {audioStream && !isMicMuted && screenStream && ' + audio'}
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <span className="w-2 h-2 bg-gray-500 rounded-full mr-2"></span>
+                          <span>Not sharing</span>
+                        </>
+                      )}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-gray-400">Participants</p>
+                    <p className="flex items-center">
+                      <span className="w-2 h-2 bg-blue-500 rounded-full mr-2"></span>
+                      <span>{participantCount} connected</span>
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Audio Controls */}
+              {isSharing && audioStream && (
+                <div className="bg-gray-800 rounded-xl p-6 shadow-lg">
+                  <h2 className="font-semibold text-lg mb-4 text-purple-300">
+                    Audio Controls
+                  </h2>
+                  <div className="space-y-4">
+                    <div>
+                      <label className="flex items-center justify-between mb-2">
+                        <span>Microphone</span>
+                        <span className={`px-2 py-1 rounded text-sm ${
+                          isMicMuted ? 'bg-red-500' : 'bg-green-500'
+                        }`}>
+                          {isMicMuted ? 'Muted' : 'Active'}
+                        </span>
+                      </label>
+                      <div className="flex justify-between items-center">
+                        <button
+                          onClick={toggleMic}
+                          className={`flex items-center justify-center w-10 h-10 rounded-full ${
+                            isMicMuted ? 'bg-gray-600 hover:bg-gray-700' : 'bg-red-600 hover:bg-red-700'
+                          } transition`}
+                          title={isMicMuted ? 'Unmute' : 'Mute'}
+                        >
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            className="h-5 w-5"
+                            viewBox="0 0 20 20"
+                            fill="currentColor"
+                          >
+                            {isMicMuted ? (
+                              <path
+                                fillRule="evenodd"
+                                d="M9.383 3.076A1 1 0 0110 4v12a1 1 0 01-1.707.707L4.586 13H2a1 1 0 01-1-1V8a1 1 0 011-1h2.586l3.707-3.707a1 1 0 011.09-.217zM12.293 7.293a1 1 0 011.414 0L15 8.586l1.293-1.293a1 1 0 111.414 1.414L16.414 10l1.293 1.293a1 1 0 01-1.414 1.414L15 11.414l-1.293 1.293a1 1 0 01-1.414-1.414L13.586 10l-1.293-1.293a1 1 0 010-1.414z"
+                                clipRule="evenodd"
+                              />
+                            ) : (
+                              <path
+                                fillRule="evenodd"
+                                d="M7 4a3 3 0 016 0v4a3 3 0 11-6 0V4zm4 10.93A7.001 7.001 0 0017 8a1 1 0 10-2 0A5 5 0 015 8a1 1 0 00-2 0 7.001 7.001 0 006 6.93V17H6a1 1 0 100 2h8a1 1 0 100-2h-3v-2.07z"
+                                clipRule="evenodd"
+                              />
+                            )}
+                          </svg>
+                        </button>
+                        <div className="flex-1 ml-4">
+                          <div className="flex items-center h-10">
+                            {Array.from({ length: 8 }).map((_, i) => (
+                              <div 
+                                key={i}
+                                className="w-1 h-2 mx-0.5 bg-green-500 rounded-full"
+                                style={{
+                                  height: speakingUsers.has(peerRef.current?.id) ? 
+                                    `${Math.random() * 12 + 2}px` : '2px'
+                                }}
+                              />
+                            ))}
+                          </div>
                         </div>
                       </div>
                     </div>
                   </div>
                 </div>
-              ))}
-              <div ref={messagesEndRef} />
+              )}
             </div>
-          </div>
-          <div className="p-4 border-t dark:border-gray-700">
-            <div className="flex space-x-2">
-              <input
-                type="text"
-                value={newMessage}
-                onChange={(e) => setNewMessage(e.target.value)}
-                onKeyPress={handleKeyPress}
-                className="flex-1 p-2 border dark:border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white dark:bg-gray-900"
-                placeholder="Type a message..."
-              />
-              <button
-                onClick={handleSendMessage}
-                className="p-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors"
+          </main>
+        )}
+
+        {error && (
+          <div className="fixed bottom-4 right-4 bg-red-600 text-white px-4 py-3 rounded-lg shadow-lg max-w-xs">
+            <div className="flex items-center">
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                className="h-5 w-5 mr-2"
+                viewBox="0 0 20 20"
+                fill="currentColor"
               >
-                <FiSend />
-              </button>
+                <path
+                  fillRule="evenodd"
+                  d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z"
+                  clipRule="evenodd"
+                />
+              </svg>
+              <span>{error}</span>
             </div>
           </div>
-        </div>
-      </div>
-
-      {/* Controls */}
-      <div className="bg-white dark:bg-gray-800 border-t dark:border-gray-700 p-3 flex justify-center space-x-4">
-        <motion.button
-          whileHover={{ scale: 1.05 }}
-          whileTap={{ scale: 0.95 }}
-          onClick={toggleAudio}
-          className={`p-3 rounded-full flex flex-col items-center ${isAudioMuted ? 'bg-red-100 dark:bg-red-900 text-red-600 dark:text-red-300' : 'bg-gray-100 dark:bg-gray-700'}`}
-        >
-          {isAudioMuted ? <FiMicOff size={20} /> : <FiMic size={20} />}
-          <span className="text-xs mt-1">{isAudioMuted ? 'Unmute' : 'Mute'}</span>
-        </motion.button>
-
-        <motion.button
-          whileHover={{ scale: 1.05 }}
-          whileTap={{ scale: 0.95 }}
-          onClick={toggleVideo}
-          className={`p-3 rounded-full flex flex-col items-center ${isVideoOff ? 'bg-red-100 dark:bg-red-900 text-red-600 dark:text-red-300' : 'bg-gray-100 dark:bg-gray-700'}`}
-        >
-          {isVideoOff ? <FiVideoOff size={20} /> : <FiVideo size={20} />}
-          <span className="text-xs mt-1">{isVideoOff ? 'Start Video' : 'Stop Video'}</span>
-        </motion.button>
-
-        <motion.button
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.95 }}
-            onClick={screenShareSupported ? toggleScreenShare : () => toast.error("Screen sharing not supported")}
-            disabled={!screenShareSupported}
-            className={`p-3 rounded-full flex flex-col items-center ${
-                isScreenSharing ? 'bg-blue-100 dark:bg-blue-900 text-blue-600 dark:text-blue-300' : 
-                !screenShareSupported ? 'bg-gray-300 dark:bg-gray-600 cursor-not-allowed' : 
-                'bg-gray-100 dark:bg-gray-700'
-            }`}
-            >
-            {isScreenSharing ? <LuMonitorOff size={20} /> : <FiMonitor size={20} />}
-            <span className="text-xs mt-1">
-                {isScreenSharing ? 'Stop Sharing' : 
-                !screenShareSupported ? 'Unavailable' : 
-                'Share Screen'}
-            </span>
-            </motion.button>
-
-        <motion.button
-          whileHover={{ scale: 1.05 }}
-          whileTap={{ scale: 0.95 }}
-          onClick={() => setShowChat(!showChat)}
-          className="md:hidden p-3 rounded-full flex flex-col items-center bg-gray-100 dark:bg-gray-700"
-        >
-          <FiMessageSquare size={20} />
-          <span className="text-xs mt-1">Chat</span>
-        </motion.button>
+        )}
       </div>
     </div>
   );
